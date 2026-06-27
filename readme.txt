@@ -3,7 +3,7 @@ Tags: woocommerce, notifuse, email, notifications, transactional
 Requires at least: 6.2
 Tested up to: 6.5
 Requires PHP: 7.4
-Stable tag: 0.4.0
+Stable tag: 0.4.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -24,6 +24,14 @@ on top of this base in subsequent releases.
 * PHP 7.4 or higher.
 
 == Changelog ==
+
+= 0.4.1 =
+* Order count now counts only paid orders (processing + completed), matched by
+  customer ID for registered users and billing email for guests — no longer
+  inflated by drafts, pending or failed orders.
+* Contacts now send the full province/state name (e.g. "Barcelona") instead of
+  the WooCommerce code ("B").
+* The billing city is now included in address line 2 (Notifuse has no city field).
 
 = 0.4.0 =
 * Mailing lists: synced customers can be subscribed to Notifuse lists. A single

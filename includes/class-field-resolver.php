@@ -90,22 +90,19 @@ class Field_Resolver {
 	// -----------------------------------------------------------------------
 
 	/**
-	 * Customer's lifetime order count.
+	 * Customer's number of **paid** orders (processing + completed).
 	 *
-	 * Registered customers use WooCommerce's own counter; guests are counted
-	 * by billing email as a fallback.
+	 * Counts only paid orders — never drafts, pending, failed or cancelled — so
+	 * abandoned checkouts don't inflate the figure. Registered customers are
+	 * matched by their account (customer ID); guests by billing email. This
+	 * deliberately avoids `wc_get_customer_order_count()`, which counts almost
+	 * every status (including `checkout-draft`) and caches the result.
 	 *
 	 * @param WC_Order $order Order.
 	 * @return int
 	 */
 	private static function order_count( WC_Order $order ) {
-		$user_id = $order->get_customer_id();
-
-		if ( $user_id ) {
-			return (int) wc_get_customer_order_count( $user_id );
-		}
-
-		return self::count_orders_by_email( $order->get_billing_email() );
+		return count( self::paid_order_ids( $order ) );
 	}
 
 	/**
@@ -248,25 +245,35 @@ class Field_Resolver {
 	// -----------------------------------------------------------------------
 
 	/**
-	 * Count a guest's orders by billing email.
+	 * IDs of the customer's paid orders (processing + completed).
 	 *
-	 * @param string $email Billing email.
-	 * @return int
+	 * Registered customers are matched by account (customer ID); guests by
+	 * billing email. Returns an empty array for guests without an email.
+	 *
+	 * @param WC_Order $order Order.
+	 * @return int[]
 	 */
-	private static function count_orders_by_email( $email ) {
-		if ( empty( $email ) ) {
-			return 0;
-		}
-
-		$ids = wc_get_orders(
-			array(
-				'billing_email' => $email,
-				'limit'         => -1,
-				'return'        => 'ids',
-			)
+	private static function paid_order_ids( WC_Order $order ) {
+		$args = array(
+			'limit'  => -1,
+			'return' => 'ids',
+			'status' => wc_get_is_paid_statuses(),
 		);
 
-		return is_array( $ids ) ? count( $ids ) : 0;
+		$user_id = $order->get_customer_id();
+		if ( $user_id ) {
+			$args['customer_id'] = $user_id;
+		} else {
+			$email = $order->get_billing_email();
+			if ( empty( $email ) ) {
+				return array();
+			}
+			$args['billing_email'] = $email;
+		}
+
+		$ids = wc_get_orders( $args );
+
+		return is_array( $ids ) ? $ids : array();
 	}
 
 	/**

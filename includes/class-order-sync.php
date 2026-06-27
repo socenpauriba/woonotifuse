@@ -194,14 +194,27 @@ class Order_Sync {
 			$contact['external_id'] = (string) $user_id;
 		}
 
+		// Notifuse has no dedicated city field, so fold the billing city into
+		// address line 2 (after any existing line 2 such as a flat/floor).
+		$line2 = implode(
+			', ',
+			array_filter(
+				array(
+					trim( (string) $order->get_billing_address_2() ),
+					trim( (string) $order->get_billing_city() ),
+				)
+			)
+		);
+
 		$fields = array(
 			'first_name'     => $order->get_billing_first_name(),
 			'last_name'      => $order->get_billing_last_name(),
 			'phone'          => $order->get_billing_phone(),
 			'address_line_1' => $order->get_billing_address_1(),
-			'address_line_2' => $order->get_billing_address_2(),
+			'address_line_2' => $line2,
 			'postcode'       => $order->get_billing_postcode(),
-			'state'          => $order->get_billing_state(),
+			// Send the full province/state name ("Barcelona"), not the code ("B").
+			'state'          => self::state_name( $order->get_billing_country(), $order->get_billing_state() ),
 			'country'        => $order->get_billing_country(),
 		);
 
@@ -222,6 +235,33 @@ class Order_Sync {
 		 * @param WC_Order $order   The order that triggered the sync.
 		 */
 		return apply_filters( 'woonotifuse_contact_payload', $contact, $order );
+	}
+
+	/**
+	 * Resolve a province/state code to its full name for the given country.
+	 *
+	 * WooCommerce stores the state as a code ("B") for countries with a defined
+	 * states list (e.g. Spain); this returns the human name ("Barcelona"). For
+	 * countries with no list (free-text state) the value is returned unchanged.
+	 *
+	 * @param string $country Billing country code.
+	 * @param string $state   Billing state code or value.
+	 * @return string
+	 */
+	private static function state_name( $country, $state ) {
+		$state = trim( (string) $state );
+
+		if ( '' === $state || '' === trim( (string) $country ) || ! function_exists( 'WC' ) || ! WC()->countries ) {
+			return $state;
+		}
+
+		$states = WC()->countries->get_states( $country );
+
+		if ( is_array( $states ) && isset( $states[ $state ] ) ) {
+			return html_entity_decode( $states[ $state ], ENT_QUOTES, 'UTF-8' );
+		}
+
+		return $state;
 	}
 
 	/**
