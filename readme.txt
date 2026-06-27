@@ -3,7 +3,7 @@ Tags: woocommerce, notifuse, email, notifications, transactional
 Requires at least: 6.2
 Tested up to: 6.5
 Requires PHP: 7.4
-Stable tag: 0.3.0
+Stable tag: 0.4.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -24,6 +24,14 @@ on top of this base in subsequent releases.
 * PHP 7.4 or higher.
 
 == Changelog ==
+
+= 0.4.0 =
+* Mailing lists: synced customers can be subscribed to Notifuse lists. A single
+  paid-order sync now calls lists.subscribe (which also upserts the contact)
+  when list IDs are configured, or contacts.upsert otherwise.
+* Optional GDPR consent checkbox at checkout (classic and block), with
+  configurable label; when enabled, only customers who tick it are subscribed.
+* Settings reorganised into "Synchronization" and "Mailing lists" sections.
 
 = 0.3.0 =
 * Self-updating: bundles the Plugin Update Checker library to serve new

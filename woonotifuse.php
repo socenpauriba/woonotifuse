@@ -3,7 +3,7 @@
  * Plugin Name:       WooNotifuse
  * Plugin URI:        https://github.com/socenpauriba/woonotifuse
  * Description:       Connect WooCommerce to Notifuse for transactional emails and newsletter automation.
- * Version:           0.3.0
+ * Version:           0.4.0
  * Requires at least: 6.2
  * Requires PHP:      7.4
  * Author:            Pau Riba
@@ -26,7 +26,7 @@ defined( 'ABSPATH' ) || exit;
 // Constants.
 // ---------------------------------------------------------------------------
 
-define( 'WOONOTIFUSE_VERSION', '0.3.0' );
+define( 'WOONOTIFUSE_VERSION', '0.4.0' );
 define( 'WOONOTIFUSE_PLUGIN_FILE', __FILE__ );
 define( 'WOONOTIFUSE_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'WOONOTIFUSE_PLUGIN_URL', plugin_dir_url( __FILE__ ) );

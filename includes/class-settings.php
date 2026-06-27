@@ -26,6 +26,11 @@ class Settings {
 	const TEST_AJAX_HOOK = 'woonotifuse_test_connection';
 
 	/**
+	 * Fallback label for the checkout consent checkbox when none is configured.
+	 */
+	const DEFAULT_CONSENT_TEXT = 'I would like to receive marketing emails and can unsubscribe at any time.';
+
+	/**
 	 * Custom-field mapping sub-controller.
 	 *
 	 * @var Field_Mappings
@@ -63,10 +68,13 @@ class Settings {
 		return wp_parse_args(
 			is_array( $stored ) ? $stored : array(),
 			array(
-				'domain'       => '',
-				'token'        => '',
-				'workspace_id' => '',
-				'auto_sync'    => false,
+				'domain'          => '',
+				'token'           => '',
+				'workspace_id'    => '',
+				'auto_sync'        => false,
+				'subscribe_lists'  => '',
+				'checkout_consent' => false,
+				'consent_text'     => '',
 			)
 		);
 	}
@@ -80,6 +88,48 @@ class Settings {
 	 */
 	public static function auto_sync_enabled() {
 		return (bool) self::get( 'auto_sync', false );
+	}
+
+	/**
+	 * The Notifuse list IDs to subscribe customers to, parsed from the
+	 * comma-separated setting into a clean array.
+	 *
+	 * @return string[]
+	 */
+	public static function subscribe_list_ids() {
+		$raw = (string) self::get( 'subscribe_lists', '' );
+
+		$ids = array_map( 'trim', explode( ',', $raw ) );
+		$ids = array_filter( $ids, static function ( $id ) {
+			return '' !== $id;
+		} );
+
+		return array_values( array_unique( $ids ) );
+	}
+
+	/**
+	 * Whether the checkout consent checkbox is enabled. When on, only customers
+	 * who tick it are subscribed; when off, subscription applies to all orders.
+	 *
+	 * @return bool
+	 */
+	public static function checkout_consent_enabled() {
+		return (bool) self::get( 'checkout_consent', false );
+	}
+
+	/**
+	 * The consent checkbox label, falling back to a default when unset.
+	 *
+	 * @return string
+	 */
+	public static function consent_text() {
+		$text = trim( (string) self::get( 'consent_text', '' ) );
+
+		if ( '' !== $text ) {
+			return $text;
+		}
+
+		return __( 'I would like to receive marketing emails and can unsubscribe at any time.', 'woonotifuse' );
 	}
 
 	/**
@@ -195,9 +245,63 @@ class Settings {
 			array(
 				'key'            => 'auto_sync',
 				'type'           => 'checkbox',
-				'checkbox_label' => __( 'Automatically sync a customer to Notifuse when their order is paid.', 'woonotifuse' ),
-				'description'    => __( 'When off, orders are only synced via the manual bulk action or the order action.', 'woonotifuse' ),
+				'checkbox_label' => __( 'Sync a customer to Notifuse when their order is paid.', 'woonotifuse' ),
+				'description'    => __( "Sends the contact's data (contacts.upsert). If mailing lists are configured below, it subscribes them instead (lists.subscribe), which also updates their data. When off, orders sync only via the manual bulk/order action.", 'woonotifuse' ),
 				'label_for'      => 'woonotifuse_auto_sync',
+			)
+		);
+
+		add_settings_section(
+			'woonotifuse_lists',
+			__( 'Mailing lists (optional)', 'woonotifuse' ),
+			function () {
+				echo '<p>' . esc_html__( 'Subscribe synced customers to Notifuse mailing lists. Leave the list IDs blank to only sync contact data.', 'woonotifuse' ) . '</p>';
+			},
+			self::PAGE_SLUG
+		);
+
+		add_settings_field(
+			'woonotifuse_subscribe_lists',
+			__( 'Notifuse list IDs', 'woonotifuse' ),
+			array( $this, 'render_field' ),
+			self::PAGE_SLUG,
+			'woonotifuse_lists',
+			array(
+				'key'         => 'subscribe_lists',
+				'type'        => 'text',
+				'placeholder' => 'newsletter, product_updates',
+				'description' => __( 'Comma-separated Notifuse list IDs (slugs). When set, synced customers are subscribed to these lists. Copy the IDs from your Notifuse workspace.', 'woonotifuse' ),
+				'label_for'   => 'woonotifuse_subscribe_lists',
+			)
+		);
+
+		add_settings_field(
+			'woonotifuse_checkout_consent',
+			__( 'Consent checkbox', 'woonotifuse' ),
+			array( $this, 'render_field' ),
+			self::PAGE_SLUG,
+			'woonotifuse_lists',
+			array(
+				'key'            => 'checkout_consent',
+				'type'           => 'checkbox',
+				'checkbox_label' => __( 'Only subscribe customers who tick a consent checkbox at checkout.', 'woonotifuse' ),
+				'description'    => __( 'Recommended for GDPR: turns list subscription into an explicit opt-in. The checkbox is shown on both the classic and block checkout, unticked by default. Without it, every synced order with list IDs set is subscribed.', 'woonotifuse' ),
+				'label_for'      => 'woonotifuse_checkout_consent',
+			)
+		);
+
+		add_settings_field(
+			'woonotifuse_consent_text',
+			__( 'Consent checkbox text', 'woonotifuse' ),
+			array( $this, 'render_field' ),
+			self::PAGE_SLUG,
+			'woonotifuse_lists',
+			array(
+				'key'         => 'consent_text',
+				'type'        => 'text',
+				'placeholder' => self::DEFAULT_CONSENT_TEXT,
+				'description' => __( 'Label shown next to the consent checkbox. Leave blank to use the default.', 'woonotifuse' ),
+				'label_for'   => 'woonotifuse_consent_text',
 			)
 		);
 	}
@@ -226,10 +330,13 @@ class Settings {
 		}
 
 		return array(
-			'domain'       => $domain,
-			'workspace_id' => isset( $input['workspace_id'] ) ? sanitize_text_field( $input['workspace_id'] ) : '',
-			'token'        => sanitize_text_field( $token ),
-			'auto_sync'    => ! empty( $input['auto_sync'] ),
+			'domain'          => $domain,
+			'workspace_id'    => isset( $input['workspace_id'] ) ? sanitize_text_field( $input['workspace_id'] ) : '',
+			'token'           => sanitize_text_field( $token ),
+			'auto_sync'       => ! empty( $input['auto_sync'] ),
+			'subscribe_lists'  => isset( $input['subscribe_lists'] ) ? sanitize_text_field( $input['subscribe_lists'] ) : '',
+			'checkout_consent' => ! empty( $input['checkout_consent'] ),
+			'consent_text'     => isset( $input['consent_text'] ) ? sanitize_textarea_field( $input['consent_text'] ) : '',
 		);
 	}
 
@@ -305,6 +412,23 @@ class Settings {
 				submit_button();
 				?>
 			</form>
+
+			<script>
+			( function () {
+				var toggle = document.getElementById( 'woonotifuse_checkout_consent' );
+				var text   = document.getElementById( 'woonotifuse_consent_text' );
+				if ( ! toggle || ! text ) { return; }
+
+				var row = text.closest( 'tr' );
+				if ( ! row ) { return; }
+
+				function sync() {
+					row.style.display = toggle.checked ? '' : 'none';
+				}
+				sync();
+				toggle.addEventListener( 'change', sync );
+			} )();
+			</script>
 
 			<hr />
 

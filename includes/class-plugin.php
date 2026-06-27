@@ -86,6 +86,7 @@ final class Plugin {
 	 */
 	private function register_order_sync() {
 		( new Order_Sync() )->init();
+		( new Checkout_Consent() )->init();
 	}
 
 	/**

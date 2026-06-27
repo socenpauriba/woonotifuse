@@ -13,13 +13,18 @@ use WP_Error;
 defined( 'ABSPATH' ) || exit;
 
 /**
- * Listens for orders entering a paid status and upserts the customer into
- * Notifuse via `contacts.upsert`.
+ * Listens for orders entering a paid status and syncs the customer to Notifuse.
+ *
+ * One trigger, one call. When mailing lists are configured and the consent
+ * requirement (if enabled) is satisfied, it calls `lists.subscribe` — which
+ * upserts the contact *and* subscribes it in a single request. Otherwise it
+ * calls `contacts.upsert` to keep the contact's data fresh without touching
+ * list membership.
  *
  * Why on a *paid* status: WooCommerce's lifetime totals (order count, total
  * spent) already include the triggering order by then, so the values computed
- * by {@see Field_Resolver} are correct without any read-before-write. The
- * upsert is idempotent — re-running it simply re-sets the same computed values.
+ * by {@see Field_Resolver} are correct without any read-before-write. Both
+ * calls are idempotent — re-running simply re-sets the same values.
  */
 class Order_Sync {
 
@@ -27,6 +32,11 @@ class Order_Sync {
 	 * Order meta key recording the last successful sync timestamp.
 	 */
 	const SYNCED_META = '_woonotifuse_contact_synced_at';
+
+	/**
+	 * Order meta key recording the last successful list-subscription timestamp.
+	 */
+	const SUBSCRIBED_META = '_woonotifuse_lists_subscribed_at';
 
 	/**
 	 * Register hooks. Runs on both front-end and admin, since orders can become
@@ -75,17 +85,18 @@ class Order_Sync {
 	}
 
 	/**
-	 * Build the contact payload and upsert it into Notifuse.
+	 * Sync an order's customer to Notifuse: subscribe to the configured lists
+	 * when allowed, otherwise just upsert the contact's data.
 	 *
 	 * @param WC_Order $order Order that triggered the sync.
 	 * @return array|WP_Error|null Decoded response, a WP_Error on failure, or
 	 *                             null when the sync was skipped.
 	 */
 	public function sync_order( WC_Order $order ) {
-		$email = sanitize_email( $order->get_billing_email() );
+		$contact = self::contact_for( $order );
 
-		// No email means no contact to key on — nothing to do.
-		if ( '' === $email || ! is_email( $email ) ) {
+		// No usable email means no contact to key on — nothing to do.
+		if ( null === $contact ) {
 			return null;
 		}
 
@@ -96,28 +107,62 @@ class Order_Sync {
 			return null;
 		}
 
-		$contact = $this->build_contact( $order, $email );
+		// Subscribe (which also upserts) when lists are configured and the
+		// consent requirement, if enabled, is met. Otherwise just upsert data.
+		$list_ids  = Settings::subscribe_list_ids();
+		$subscribe = ! empty( $list_ids )
+			&& ( ! Settings::checkout_consent_enabled() || Checkout_Consent::has_consent( $order ) );
 
-		$response = $client->post( 'api/contacts.upsert', array( 'contact' => $contact ) );
+		if ( $subscribe ) {
+			$response = $client->post(
+				'api/lists.subscribe',
+				array(
+					'contact'  => $contact,
+					'list_ids' => $list_ids,
+				)
+			);
+		} else {
+			$response = $client->post( 'api/contacts.upsert', array( 'contact' => $contact ) );
+		}
 
 		if ( is_wp_error( $response ) ) {
 			$this->log_failure( $order, $response );
 			return $response;
 		}
 
-		$order->update_meta_data( self::SYNCED_META, gmdate( 'Y-m-d\TH:i:s\Z' ) );
+		$now = gmdate( 'Y-m-d\TH:i:s\Z' );
+		$order->update_meta_data( self::SYNCED_META, $now );
+		if ( $subscribe ) {
+			$order->update_meta_data( self::SUBSCRIBED_META, $now );
+		}
 		$order->save_meta_data();
 
-		$this->log( sprintf( 'Contact %s synced for order #%d.', $email, $order->get_id() ), 'info' );
+		$this->log(
+			$subscribe
+				? sprintf( 'Contact %s synced + subscribed to [%s] for order #%d.', $contact['email'], implode( ', ', $list_ids ), $order->get_id() )
+				: sprintf( 'Contact %s synced for order #%d.', $contact['email'], $order->get_id() ),
+			'info'
+		);
 
 		/**
-		 * Fires after a contact has been successfully upserted to Notifuse.
+		 * Fires after a contact has been successfully synced to Notifuse.
 		 *
 		 * @param array    $response The decoded Notifuse response.
 		 * @param array    $contact  The contact payload that was sent.
 		 * @param WC_Order $order    The order that triggered the sync.
 		 */
 		do_action( 'woonotifuse_contact_synced', $response, $contact, $order );
+
+		if ( $subscribe ) {
+			/**
+			 * Fires after a customer has been subscribed to Notifuse lists.
+			 *
+			 * @param array    $response The decoded Notifuse response.
+			 * @param string[] $list_ids The list IDs subscribed to.
+			 * @param WC_Order $order    The order that triggered the subscription.
+			 */
+			do_action( 'woonotifuse_lists_subscribed', $response, $list_ids, $order );
+		}
 
 		return $response;
 	}
@@ -126,13 +171,21 @@ class Order_Sync {
 	 * Assemble the Notifuse contact payload from an order.
 	 *
 	 * Standard billing fields plus the enabled custom-field mappings from
-	 * {@see Field_Resolver}. Only non-empty values are included.
+	 * {@see Field_Resolver}. Only non-empty values are included. Shared by the
+	 * contact upsert and the list subscription, since Notifuse's Contact and
+	 * SubscriptionContact share the same shape (email required).
 	 *
 	 * @param WC_Order $order Order.
-	 * @param string   $email Sanitized billing email.
-	 * @return array<string,mixed>
+	 * @return array<string,mixed>|null The contact payload, or null when the
+	 *                                  order has no usable billing email.
 	 */
-	private function build_contact( WC_Order $order, $email ) {
+	public static function contact_for( WC_Order $order ) {
+		$email = sanitize_email( $order->get_billing_email() );
+
+		if ( '' === $email || ! is_email( $email ) ) {
+			return null;
+		}
+
 		$contact = array( 'email' => $email );
 
 		// A registered customer's WP user ID makes a stable external identifier.
@@ -189,7 +242,7 @@ class Order_Sync {
 		$order->add_order_note(
 			sprintf(
 				/* translators: %s: error message returned by Notifuse. */
-				__( 'WooNotifuse: contact sync to Notifuse failed — %s', 'woonotifuse' ),
+				__( 'WooNotifuse: sync to Notifuse failed — %s', 'woonotifuse' ),
 				$message
 			)
 		);
