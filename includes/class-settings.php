@@ -55,7 +55,7 @@ class Settings {
 	/**
 	 * Get all settings with defaults applied.
 	 *
-	 * @return array{domain:string,token:string,workspace_id:string}
+	 * @return array{domain:string,token:string,workspace_id:string,auto_sync:bool}
 	 */
 	public static function all() {
 		$stored = get_option( self::OPTION_KEY, array() );
@@ -66,8 +66,20 @@ class Settings {
 				'domain'       => '',
 				'token'        => '',
 				'workspace_id' => '',
+				'auto_sync'    => false,
 			)
 		);
+	}
+
+	/**
+	 * Whether orders should be synced automatically when they become paid.
+	 *
+	 * Manual bulk / order actions are unaffected by this setting.
+	 *
+	 * @return bool
+	 */
+	public static function auto_sync_enabled() {
+		return (bool) self::get( 'auto_sync', false );
 	}
 
 	/**
@@ -166,6 +178,28 @@ class Settings {
 				array_merge( $field, array( 'key' => $key, 'label_for' => 'woonotifuse_' . $key ) )
 			);
 		}
+
+		add_settings_section(
+			'woonotifuse_sync',
+			__( 'Synchronization', 'woonotifuse' ),
+			'__return_false',
+			self::PAGE_SLUG
+		);
+
+		add_settings_field(
+			'woonotifuse_auto_sync',
+			__( 'Automatic sync', 'woonotifuse' ),
+			array( $this, 'render_field' ),
+			self::PAGE_SLUG,
+			'woonotifuse_sync',
+			array(
+				'key'            => 'auto_sync',
+				'type'           => 'checkbox',
+				'checkbox_label' => __( 'Automatically sync a customer to Notifuse when their order is paid.', 'woonotifuse' ),
+				'description'    => __( 'When off, orders are only synced via the manual bulk action or the order action.', 'woonotifuse' ),
+				'label_for'      => 'woonotifuse_auto_sync',
+			)
+		);
 	}
 
 	/**
@@ -195,6 +229,7 @@ class Settings {
 			'domain'       => $domain,
 			'workspace_id' => isset( $input['workspace_id'] ) ? sanitize_text_field( $input['workspace_id'] ) : '',
 			'token'        => sanitize_text_field( $token ),
+			'auto_sync'    => ! empty( $input['auto_sync'] ),
 		);
 	}
 
@@ -212,6 +247,23 @@ class Settings {
 		$value = self::get( $key );
 		$id    = 'woonotifuse_' . $key;
 		$name  = self::OPTION_KEY . '[' . $key . ']';
+
+		// Checkboxes render as a labelled toggle storing "1" when enabled.
+		if ( 'checkbox' === $args['type'] ) {
+			printf(
+				'<label for="%1$s"><input type="checkbox" id="%1$s" name="%2$s" value="1" %3$s /> %4$s</label>',
+				esc_attr( $id ),
+				esc_attr( $name ),
+				checked( (bool) $value, true, false ),
+				esc_html( isset( $args['checkbox_label'] ) ? $args['checkbox_label'] : '' )
+			);
+
+			if ( ! empty( $args['description'] ) ) {
+				printf( '<p class="description">%s</p>', esc_html( $args['description'] ) );
+			}
+
+			return;
+		}
 
 		// Never echo the stored token back; show a placeholder if one exists.
 		$display = ( 'token' === $key ) ? '' : $value;

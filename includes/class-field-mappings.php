@@ -28,6 +28,7 @@ class Field_Mappings {
 	const LANG_MODE_FIXED   = 'fixed';
 	const LANG_MODE_WPML    = 'wpml';
 	const LANG_MODE_ZIPCODE = 'zipcode';
+	const LANG_MODE_STATE   = 'state';
 
 	/**
 	 * Canonical definition of the available mappings.
@@ -61,8 +62,10 @@ class Field_Mappings {
 			'preferred_lang' => array(
 				'label'       => __( 'Preferred language', 'woonotifuse' ),
 				'type'        => 'string',
-				'description' => __( 'A language code, resolved from one of several sources (see below).', 'woonotifuse' ),
+				'description' => __( "A language code, resolved from one of several sources (see below). Written to the contact's built-in Language field.", 'woonotifuse' ),
 				'has_modes'   => true,
+				// Writes to Notifuse's native contact field instead of a custom one.
+				'native'      => 'language',
 			),
 		);
 	}
@@ -143,6 +146,8 @@ class Field_Mappings {
 			$defaults['fixed_value']      = '';
 			$defaults['zipcode_rules']    = '';
 			$defaults['zipcode_fallback'] = '';
+			$defaults['state_rules']      = '';
+			$defaults['state_fallback']   = '';
 		}
 
 		return $defaults;
@@ -191,10 +196,14 @@ class Field_Mappings {
 				'target'  => '',
 			);
 
-			// Validate the target against the allowed set for this field type.
-			$allowed = self::notifuse_field_choices( $def['type'] );
-			if ( isset( $raw['target'] ) && isset( $allowed[ $raw['target'] ] ) ) {
-				$entry['target'] = $raw['target'];
+			// Native-target mappings write to a built-in contact field, so there
+			// is no custom-field target to validate. Otherwise, validate the
+			// chosen target against the allowed set for this field type.
+			if ( empty( $def['native'] ) ) {
+				$allowed = self::notifuse_field_choices( $def['type'] );
+				if ( isset( $raw['target'] ) && isset( $allowed[ $raw['target'] ] ) ) {
+					$entry['target'] = $raw['target'];
+				}
 			}
 
 			if ( ! empty( $def['has_modes'] ) ) {
@@ -202,9 +211,13 @@ class Field_Mappings {
 				$entry['mode']      = in_array( $mode, self::lang_modes(), true ) ? $mode : self::LANG_MODE_FIXED;
 				$entry['fixed_value']      = isset( $raw['fixed_value'] ) ? sanitize_text_field( $raw['fixed_value'] ) : '';
 				$entry['zipcode_fallback'] = isset( $raw['zipcode_fallback'] ) ? sanitize_text_field( $raw['zipcode_fallback'] ) : '';
-				// Keep newlines for the rules textarea.
+				$entry['state_fallback']   = isset( $raw['state_fallback'] ) ? sanitize_text_field( $raw['state_fallback'] ) : '';
+				// Keep newlines for the rules textareas.
 				$entry['zipcode_rules'] = isset( $raw['zipcode_rules'] )
 					? sanitize_textarea_field( $raw['zipcode_rules'] )
+					: '';
+				$entry['state_rules'] = isset( $raw['state_rules'] )
+					? sanitize_textarea_field( $raw['state_rules'] )
 					: '';
 			}
 
@@ -220,7 +233,23 @@ class Field_Mappings {
 	 * @return string[]
 	 */
 	public static function lang_modes() {
-		return array( self::LANG_MODE_FIXED, self::LANG_MODE_WPML, self::LANG_MODE_ZIPCODE );
+		return array( self::LANG_MODE_FIXED, self::LANG_MODE_WPML, self::LANG_MODE_ZIPCODE, self::LANG_MODE_STATE );
+	}
+
+	/**
+	 * Whether a multilingual plugin that powers the WPML mode is available.
+	 *
+	 * Detects WPML (and the Polylang WPML-compatibility layer, which also
+	 * populates the `wpml_language` order meta and the `wpml_current_language`
+	 * filter the resolver relies on). When false, the WPML language mode has no
+	 * data source and must not be used.
+	 *
+	 * @return bool
+	 */
+	public static function is_wpml_active() {
+		return class_exists( 'SitePress' )
+			|| defined( 'ICL_LANGUAGE_CODE' )
+			|| function_exists( 'pll_current_language' );
 	}
 
 	// -----------------------------------------------------------------------
@@ -258,21 +287,24 @@ class Field_Mappings {
 						</td>
 					</tr>
 					<tr>
-						<th scope="row">
-							<label for="<?php echo esc_attr( 'wn-target-' . $key ); ?>">
-								<?php esc_html_e( 'Notifuse field', 'woonotifuse' ); ?>
-							</label>
-						</th>
+						<th scope="row"><?php esc_html_e( 'Notifuse field', 'woonotifuse' ); ?></th>
 						<td>
-							<select id="<?php echo esc_attr( 'wn-target-' . $key ); ?>"
-								name="<?php echo esc_attr( self::field_name( $key, 'target' ) ); ?>">
-								<option value=""><?php esc_html_e( '— Select a field —', 'woonotifuse' ); ?></option>
-								<?php foreach ( self::notifuse_field_choices( $def['type'] ) as $fkey => $flabel ) : ?>
-									<option value="<?php echo esc_attr( $fkey ); ?>" <?php selected( $entry['target'], $fkey ); ?>>
-										<?php echo esc_html( $flabel ); ?>
-									</option>
-								<?php endforeach; ?>
-							</select>
+							<?php if ( ! empty( $def['native'] ) ) : ?>
+								<code><?php echo esc_html( $def['native'] ); ?></code>
+								<p class="description">
+									<?php esc_html_e( "Written to the contact's built-in field; no custom field needed.", 'woonotifuse' ); ?>
+								</p>
+							<?php else : ?>
+								<select id="<?php echo esc_attr( 'wn-target-' . $key ); ?>"
+									name="<?php echo esc_attr( self::field_name( $key, 'target' ) ); ?>">
+									<option value=""><?php esc_html_e( '— Select a field —', 'woonotifuse' ); ?></option>
+									<?php foreach ( self::notifuse_field_choices( $def['type'] ) as $fkey => $flabel ) : ?>
+										<option value="<?php echo esc_attr( $fkey ); ?>" <?php selected( $entry['target'], $fkey ); ?>>
+											<?php echo esc_html( $flabel ); ?>
+										</option>
+									<?php endforeach; ?>
+								</select>
+							<?php endif; ?>
 						</td>
 					</tr>
 
@@ -309,11 +341,25 @@ class Field_Mappings {
 					<option value="<?php echo esc_attr( self::LANG_MODE_FIXED ); ?>" <?php selected( $mode, self::LANG_MODE_FIXED ); ?>>
 						<?php esc_html_e( 'Fixed value', 'woonotifuse' ); ?>
 					</option>
-					<option value="<?php echo esc_attr( self::LANG_MODE_WPML ); ?>" <?php selected( $mode, self::LANG_MODE_WPML ); ?>>
-						<?php esc_html_e( 'WPML order language', 'woonotifuse' ); ?>
+					<?php
+					$wpml_active = self::is_wpml_active();
+					// Disable the WPML option when WPML is absent — unless it is the
+					// already-saved mode, so an existing selection stays visible.
+					$wpml_disabled = ( ! $wpml_active && self::LANG_MODE_WPML !== $mode );
+					$wpml_label    = $wpml_active
+						? __( 'WPML order language', 'woonotifuse' )
+						: __( 'WPML order language (requires WPML)', 'woonotifuse' );
+					?>
+					<option value="<?php echo esc_attr( self::LANG_MODE_WPML ); ?>"
+						<?php selected( $mode, self::LANG_MODE_WPML ); ?>
+						<?php disabled( $wpml_disabled ); ?>>
+						<?php echo esc_html( $wpml_label ); ?>
 					</option>
 					<option value="<?php echo esc_attr( self::LANG_MODE_ZIPCODE ); ?>" <?php selected( $mode, self::LANG_MODE_ZIPCODE ); ?>>
 						<?php esc_html_e( 'Zip code mapping', 'woonotifuse' ); ?>
+					</option>
+					<option value="<?php echo esc_attr( self::LANG_MODE_STATE ); ?>" <?php selected( $mode, self::LANG_MODE_STATE ); ?>>
+						<?php esc_html_e( 'Province / state mapping', 'woonotifuse' ); ?>
 					</option>
 				</select>
 			</td>
@@ -350,6 +396,29 @@ class Field_Mappings {
 					value="<?php echo esc_attr( isset( $entry['zipcode_fallback'] ) ? $entry['zipcode_fallback'] : '' ); ?>"
 					placeholder="es" />
 				<p class="description"><?php esc_html_e( 'Used when no zip code rule matches. Leave blank to send nothing.', 'woonotifuse' ); ?></p>
+			</td>
+		</tr>
+
+		<tr class="wn-lang-row wn-lang-row-<?php echo esc_attr( $key ); ?>" data-mode="<?php echo esc_attr( self::LANG_MODE_STATE ); ?>">
+			<th scope="row"><?php esc_html_e( 'Province / state rules', 'woonotifuse' ); ?></th>
+			<td>
+				<textarea class="large-text code" rows="5"
+					name="<?php echo esc_attr( self::field_name( $key, 'state_rules' ) ); ?>"
+					placeholder="ca = B, GI, L, T, PM&#10;eu = BI, SS, VI, NA"><?php echo esc_textarea( isset( $entry['state_rules'] ) ? $entry['state_rules'] : '' ); ?></textarea>
+				<p class="description">
+					<?php esc_html_e( 'One rule per line, in the form: value = comma,separated,state codes. The billing province/state code is matched against each rule top to bottom; the first match wins. Use WooCommerce state codes (e.g. for Spain: B = Barcelona, GI = Girona, PM = Baleares).', 'woonotifuse' ); ?>
+				</p>
+			</td>
+		</tr>
+
+		<tr class="wn-lang-row wn-lang-row-<?php echo esc_attr( $key ); ?>" data-mode="<?php echo esc_attr( self::LANG_MODE_STATE ); ?>">
+			<th scope="row"><?php esc_html_e( 'Fallback value', 'woonotifuse' ); ?></th>
+			<td>
+				<input type="text" class="regular-text"
+					name="<?php echo esc_attr( self::field_name( $key, 'state_fallback' ) ); ?>"
+					value="<?php echo esc_attr( isset( $entry['state_fallback'] ) ? $entry['state_fallback'] : '' ); ?>"
+					placeholder="es" />
+				<p class="description"><?php esc_html_e( 'Used when no province/state rule matches. Leave blank to send nothing.', 'woonotifuse' ); ?></p>
 			</td>
 		</tr>
 		<?php

@@ -29,17 +29,27 @@ class Field_Resolver {
 	 * @return array<string,mixed> Notifuse field key => value (enabled, targeted, non-null only).
 	 */
 	public static function for_order( WC_Order $order ) {
-		$payload = array();
+		$payload     = array();
+		$definitions = Field_Mappings::definitions();
 
 		foreach ( Field_Mappings::all() as $key => $config ) {
-			if ( empty( $config['enabled'] ) || empty( $config['target'] ) ) {
+			if ( empty( $config['enabled'] ) ) {
+				continue;
+			}
+
+			// Some mappings write to a built-in Notifuse contact field (e.g.
+			// "language"); the rest write to the admin-chosen custom field.
+			$def    = isset( $definitions[ $key ] ) ? $definitions[ $key ] : array();
+			$target = ! empty( $def['native'] ) ? $def['native'] : ( ! empty( $config['target'] ) ? $config['target'] : '' );
+
+			if ( '' === $target ) {
 				continue;
 			}
 
 			$value = self::compute( $key, $order, $config );
 
 			if ( null !== $value && '' !== $value ) {
-				$payload[ $config['target'] ] = $value;
+				$payload[ $target ] = $value;
 			}
 		}
 
@@ -204,7 +214,7 @@ class Field_Resolver {
 				return self::wpml_language( $order );
 
 			case Field_Mappings::LANG_MODE_ZIPCODE:
-				$matched = self::match_zipcode(
+				$matched = self::match_rules(
 					$order->get_billing_postcode(),
 					isset( $config['zipcode_rules'] ) ? $config['zipcode_rules'] : ''
 				);
@@ -214,6 +224,19 @@ class Field_Resolver {
 				}
 
 				$fallback = isset( $config['zipcode_fallback'] ) ? trim( $config['zipcode_fallback'] ) : '';
+				return '' !== $fallback ? $fallback : null;
+
+			case Field_Mappings::LANG_MODE_STATE:
+				$matched = self::match_rules(
+					$order->get_billing_state(),
+					isset( $config['state_rules'] ) ? $config['state_rules'] : ''
+				);
+
+				if ( null !== $matched ) {
+					return $matched;
+				}
+
+				$fallback = isset( $config['state_fallback'] ) ? trim( $config['state_fallback'] ) : '';
 				return '' !== $fallback ? $fallback : null;
 		}
 
@@ -284,6 +307,12 @@ class Field_Resolver {
 	 * @return string|null
 	 */
 	private static function wpml_language( WC_Order $order ) {
+		// The WPML mode requires a multilingual plugin; without one there is no
+		// language source, so resolve to nothing rather than guessing.
+		if ( ! Field_Mappings::is_wpml_active() ) {
+			return null;
+		}
+
 		$lang = $order->get_meta( 'wpml_language' );
 
 		if ( empty( $lang ) ) {
@@ -298,17 +327,20 @@ class Field_Resolver {
 	}
 
 	/**
-	 * Match a postcode against the configured rules.
+	 * Match a value against the configured rules.
 	 *
-	 * Rules are one-per-line "value = zip, zip, zip". The first rule containing
-	 * the (normalised) postcode wins.
+	 * Rules are one-per-line "value = token, token, token". The first rule
+	 * containing the (normalised) needle wins. Used for both postcode and
+	 * province/state matching — the tokens are normalised the same way
+	 * (upper-cased, whitespace stripped), which suits zip codes (08001) and
+	 * WooCommerce state codes (B, GI) alike.
 	 *
-	 * @param string $postcode Billing postcode.
-	 * @param string $rules    Raw rules text.
+	 * @param string $needle Raw value to look up (postcode or state code).
+	 * @param string $rules  Raw rules text.
 	 * @return string|null Matched value, or null when nothing matches.
 	 */
-	private static function match_zipcode( $postcode, $rules ) {
-		$needle = self::normalize_zip( $postcode );
+	private static function match_rules( $needle, $rules ) {
+		$needle = self::normalize_token( $needle );
 
 		if ( '' === $needle || '' === trim( (string) $rules ) ) {
 			return null;
@@ -321,14 +353,14 @@ class Field_Resolver {
 				continue;
 			}
 
-			list( $value, $zips ) = array_map( 'trim', explode( '=', $line, 2 ) );
+			list( $value, $tokens ) = array_map( 'trim', explode( '=', $line, 2 ) );
 
-			if ( '' === $value || '' === $zips ) {
+			if ( '' === $value || '' === $tokens ) {
 				continue;
 			}
 
-			foreach ( explode( ',', $zips ) as $zip ) {
-				if ( self::normalize_zip( $zip ) === $needle ) {
+			foreach ( explode( ',', $tokens ) as $token ) {
+				if ( self::normalize_token( $token ) === $needle ) {
 					return $value;
 				}
 			}
@@ -338,12 +370,12 @@ class Field_Resolver {
 	}
 
 	/**
-	 * Normalise a postcode for comparison (upper-case, no whitespace).
+	 * Normalise a token for comparison (upper-case, no whitespace).
 	 *
-	 * @param string $zip Postcode.
+	 * @param string $token Postcode or state code.
 	 * @return string
 	 */
-	private static function normalize_zip( $zip ) {
-		return strtoupper( preg_replace( '/\s+/', '', (string) $zip ) );
+	private static function normalize_token( $token ) {
+		return strtoupper( preg_replace( '/\s+/', '', (string) $token ) );
 	}
 }

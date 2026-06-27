@@ -58,6 +58,7 @@ final class Plugin {
 
 		$this->load_textdomain();
 		$this->register_admin();
+		$this->register_order_sync();
 
 		/**
 		 * Fires once WooNotifuse has booted and WooCommerce is confirmed ready.
@@ -73,7 +74,18 @@ final class Plugin {
 	private function register_admin() {
 		if ( is_admin() ) {
 			( new Settings() )->init();
+			( new Order_Actions() )->init();
 		}
+	}
+
+	/**
+	 * Wire up the order → Notifuse contact sync.
+	 *
+	 * Registered unconditionally (not admin-only): orders can become paid from
+	 * the checkout, the admin, webhooks or cron.
+	 */
+	private function register_order_sync() {
+		( new Order_Sync() )->init();
 	}
 
 	/**

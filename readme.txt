@@ -4,7 +4,7 @@ Tags: woocommerce, notifuse, email, notifications, transactional
 Requires at least: 6.2
 Tested up to: 6.5
 Requires PHP: 7.4
-Stable tag: 0.1.0
+Stable tag: 0.2.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -25,6 +25,13 @@ on top of this base in subsequent releases.
 * PHP 7.4 or higher.
 
 == Changelog ==
+
+= 0.2.0 =
+* Order sync: upserts the customer to a Notifuse contact when an order first
+  enters a paid status (contacts.upsert), reusing the custom-field mappings.
+* New "Province / state mapping" source for the preferred-language field.
+* The WPML language mode now requires an active WPML/Polylang install and
+  degrades gracefully (no value) when none is present.
 
 = 0.1.0 =
 * Initial plugin base: WooCommerce dependency guard, HPOS compatibility,
