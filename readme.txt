@@ -4,7 +4,7 @@ Tags: woocommerce, notifuse, email, notifications, transactional
 Requires at least: 6.2
 Tested up to: 6.5
 Requires PHP: 7.4
-Stable tag: 0.2.0
+Stable tag: 0.3.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -25,6 +25,10 @@ on top of this base in subsequent releases.
 * PHP 7.4 or higher.
 
 == Changelog ==
+
+= 0.3.0 =
+* Self-updating: bundles the Plugin Update Checker library to serve new
+  versions from the plugin's GitHub releases on the WordPress Plugins screen.
 
 = 0.2.0 =
 * Order sync: upserts the customer to a Notifuse contact when an order first
