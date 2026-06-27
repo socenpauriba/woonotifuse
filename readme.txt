@@ -1,5 +1,4 @@
 === WooNotifuse ===
-Contributors: nuvol
 Tags: woocommerce, notifuse, email, notifications, transactional
 Requires at least: 6.2
 Tested up to: 6.5
