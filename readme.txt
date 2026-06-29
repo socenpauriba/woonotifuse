@@ -3,7 +3,7 @@ Tags: woocommerce, notifuse, email, notifications, transactional
 Requires at least: 6.2
 Tested up to: 6.5
 Requires PHP: 7.4
-Stable tag: 0.4.1
+Stable tag: 0.5.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -24,6 +24,15 @@ on top of this base in subsequent releases.
 * PHP 7.4 or higher.
 
 == Changelog ==
+
+= 0.5.0 =
+* The "Sync with Notifuse" bulk action now processes orders in the background
+  via Action Scheduler instead of synchronously — large selections no longer
+  time out (the old loop made one API call per order and failed at ~50).
+* Bulk syncs now use Notifuse's batch `contacts.import` endpoint: contacts are
+  de-duplicated by email and imported in chunks, so 50 orders take one or two
+  API calls instead of fifty. Per-contact results stamp order meta and surface
+  failures as order notes, the same as a single sync.
 
 = 0.4.1 =
 * Order count now counts only paid orders (processing + completed), matched by

@@ -18,9 +18,13 @@ defined( 'ABSPATH' ) || exit;
  *   HPOS orders table), and
  * - a single-order action in the "Order actions" box on the order edit screen.
  *
- * Both delegate to {@see Order_Sync::sync_order()}, so a manual sync behaves
- * exactly like the automatic paid-status one — including writing the
- * "synced at" order meta.
+ * The single-order action runs {@see Order_Sync::sync_order()} inline. The bulk
+ * action instead *queues* the selection for background processing via Action
+ * Scheduler ({@see Order_Sync::run_batch()} → `contacts.import`), so a large
+ * selection never blocks the admin request — the original synchronous loop
+ * timed out at ~50 orders. Either way a manual sync behaves like the automatic
+ * paid-status one (same payload, same "synced at" meta) and is unaffected by
+ * the `auto_sync` toggle.
  */
 class Order_Actions {
 
@@ -128,7 +132,13 @@ class Order_Actions {
 	}
 
 	/**
-	 * Process selected orders, then carry a result tally in the redirect URL.
+	 * Queue the selected orders for background syncing, then carry a count in
+	 * the redirect URL so the notice can confirm what was enqueued.
+	 *
+	 * Syncing runs out-of-band via Action Scheduler (in {@see Order_Sync}) so a
+	 * large selection never blocks the admin request or hits its time limit. If
+	 * Action Scheduler is somehow unavailable, fall back to processing inline in
+	 * batches — still a handful of `contacts.import` calls, not one per order.
 	 *
 	 * @param string $redirect_to Destination URL WordPress will redirect to.
 	 * @param string $action      The chosen bulk action.
@@ -140,34 +150,44 @@ class Order_Actions {
 			return $redirect_to;
 		}
 
-		$synced  = 0;
-		$failed  = 0;
-		$skipped = 0;
+		$ids = array_values( array_filter( array_map( 'absint', (array) $ids ) ) );
+		if ( empty( $ids ) ) {
+			return $redirect_to;
+		}
 
-		foreach ( (array) $ids as $id ) {
-			$order = wc_get_order( $id );
+		$chunks = array_chunk( $ids, Order_Sync::BATCH_SIZE );
 
-			if ( ! $order instanceof WC_Order ) {
-				++$skipped;
-				continue;
+		if ( function_exists( 'as_enqueue_async_action' ) ) {
+			foreach ( $chunks as $chunk ) {
+				as_enqueue_async_action(
+					Order_Sync::BATCH_HOOK,
+					array( $chunk ),
+					Order_Sync::AS_GROUP
+				);
 			}
 
-			$result = $this->sync->sync_order( $order );
+			return add_query_arg( array( 'woonotifuse_queued' => count( $ids ) ), $redirect_to );
+		}
 
-			if ( is_wp_error( $result ) ) {
-				++$failed;
-			} elseif ( null === $result ) {
-				++$skipped;
-			} else {
-				++$synced;
+		// Fallback: no Action Scheduler — process inline, still batched.
+		$tally = array(
+			'synced'  => 0,
+			'failed'  => 0,
+			'skipped' => 0,
+		);
+
+		foreach ( $chunks as $chunk ) {
+			$result = $this->sync->sync_orders_batch( $chunk );
+			foreach ( $tally as $key => $value ) {
+				$tally[ $key ] = $value + ( isset( $result[ $key ] ) ? (int) $result[ $key ] : 0 );
 			}
 		}
 
 		return add_query_arg(
 			array(
-				'woonotifuse_synced'  => $synced,
-				'woonotifuse_failed'  => $failed,
-				'woonotifuse_skipped' => $skipped,
+				'woonotifuse_synced'  => $tally['synced'],
+				'woonotifuse_failed'  => $tally['failed'],
+				'woonotifuse_skipped' => $tally['skipped'],
 			),
 			$redirect_to
 		);
@@ -181,7 +201,8 @@ class Order_Actions {
 	 */
 	public function render_bulk_notice() {
 		if (
-			! isset( $_GET['woonotifuse_synced'] )
+			! isset( $_GET['woonotifuse_queued'] )
+			&& ! isset( $_GET['woonotifuse_synced'] )
 			&& ! isset( $_GET['woonotifuse_failed'] )
 			&& ! isset( $_GET['woonotifuse_skipped'] )
 		) {
@@ -190,6 +211,29 @@ class Order_Actions {
 
 		$screen = get_current_screen();
 		if ( ! $screen || ! in_array( $screen->id, self::SCREENS, true ) ) {
+			return;
+		}
+
+		// Normal path: orders were queued for background syncing.
+		if ( isset( $_GET['woonotifuse_queued'] ) ) {
+			$queued = absint( wp_unslash( $_GET['woonotifuse_queued'] ) );
+
+			printf(
+				'<div class="notice notice-info is-dismissible"><p>%s</p></div>',
+				esc_html(
+					sprintf(
+						/* translators: %d: number of orders. */
+						_n(
+							'%d order queued for syncing to Notifuse. It runs in the background; results appear in each order\'s notes and in WooCommerce → Status → Logs.',
+							'%d orders queued for syncing to Notifuse. They run in the background; results appear in each order\'s notes and in WooCommerce → Status → Logs.',
+							$queued,
+							'woonotifuse'
+						),
+						$queued
+					)
+				)
+			);
+
 			return;
 		}
 

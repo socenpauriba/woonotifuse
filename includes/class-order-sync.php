@@ -39,11 +39,32 @@ class Order_Sync {
 	const SUBSCRIBED_META = '_woonotifuse_lists_subscribed_at';
 
 	/**
+	 * Action Scheduler hook a queued batch of orders is processed under.
+	 */
+	const BATCH_HOOK = 'woonotifuse_sync_orders_batch';
+
+	/**
+	 * Action Scheduler group, so queued jobs are easy to find and bulk-cancel.
+	 */
+	const AS_GROUP = 'woonotifuse';
+
+	/**
+	 * Orders per queued batch. Also caps the number of contacts in a single
+	 * `contacts.import` call (one chunk → at most this many contacts, before
+	 * per-customer de-duplication shrinks it further).
+	 */
+	const BATCH_SIZE = 50;
+
+	/**
 	 * Register hooks. Runs on both front-end and admin, since orders can become
 	 * paid from the checkout, the admin, webhooks or cron.
 	 */
 	public function init() {
 		add_action( 'woocommerce_order_status_changed', array( $this, 'on_status_changed' ), 10, 4 );
+
+		// Background processor for manual bulk syncs. Registered unconditionally
+		// because Action Scheduler runs the queue in a non-admin loopback request.
+		add_action( self::BATCH_HOOK, array( $this, 'run_batch' ), 10, 1 );
 	}
 
 	/**
@@ -168,6 +189,237 @@ class Order_Sync {
 	}
 
 	/**
+	 * Action Scheduler entry point: sync one queued batch of orders.
+	 *
+	 * @param int[] $order_ids Order IDs in this batch.
+	 */
+	public function run_batch( $order_ids = array() ) {
+		$this->sync_orders_batch( (array) $order_ids );
+	}
+
+	/**
+	 * Sync many orders with as few API calls as possible via `contacts.import`.
+	 *
+	 * Builds one contact per order, de-duplicates by email (a customer with
+	 * several selected orders is imported once — the computed values are
+	 * identical, and a single order opting in is enough to subscribe), then
+	 * splits the contacts into a "subscribe" bucket (lists configured + consent
+	 * satisfied) and an "upsert-only" bucket, importing each in chunks.
+	 *
+	 * Unlike {@see sync_order()}, this never calls `lists.subscribe`/`upsert`
+	 * per order: the subscribe bucket uses `contacts.import` with
+	 * `subscribe_to_lists` (its batch equivalent), the other a plain import.
+	 *
+	 * @param int[] $order_ids Order IDs to sync.
+	 * @return array{synced:int,failed:int,skipped:int} Per-order tally.
+	 */
+	public function sync_orders_batch( array $order_ids ) {
+		$tally = array(
+			'synced'  => 0,
+			'failed'  => 0,
+			'skipped' => 0,
+		);
+
+		$client = Settings::make_client();
+		if ( ! $client->is_configured() ) {
+			// Not configured — nothing to do. Count every order as skipped.
+			$tally['skipped'] = count( $order_ids );
+			return $tally;
+		}
+
+		$list_ids = Settings::subscribe_list_ids();
+
+		// Group orders by email. Each entry collects the contact payload, the
+		// effective subscribe decision, and every order it covers (so meta and
+		// notes land on all of them once the batch resolves).
+		$by_email = array();
+
+		foreach ( $order_ids as $id ) {
+			$order = wc_get_order( $id );
+			if ( ! $order instanceof WC_Order ) {
+				++$tally['skipped'];
+				continue;
+			}
+
+			$contact = self::contact_for( $order );
+			if ( null === $contact ) {
+				++$tally['skipped'];
+				continue;
+			}
+
+			$email     = $contact['email'];
+			$key       = strtolower( $email );
+			$subscribe = ! empty( $list_ids )
+				&& ( ! Settings::checkout_consent_enabled() || Checkout_Consent::has_consent( $order ) );
+
+			if ( ! isset( $by_email[ $key ] ) ) {
+				$by_email[ $key ] = array(
+					'contact'   => $contact,
+					'subscribe' => $subscribe,
+					'orders'    => array(),
+				);
+			} else {
+				// Same customer, another order: refresh the payload (values are
+				// computed identically) and OR the opt-in.
+				$by_email[ $key ]['contact']    = $contact;
+				$by_email[ $key ]['subscribe'] = $by_email[ $key ]['subscribe'] || $subscribe;
+			}
+
+			$by_email[ $key ]['orders'][] = $order;
+		}
+
+		if ( empty( $by_email ) ) {
+			return $tally;
+		}
+
+		// Split into the two API shapes.
+		$subscribe_bucket = array();
+		$upsert_bucket    = array();
+		foreach ( $by_email as $entry ) {
+			if ( $entry['subscribe'] ) {
+				$subscribe_bucket[] = $entry;
+			} else {
+				$upsert_bucket[] = $entry;
+			}
+		}
+
+		$this->import_bucket( $client, $upsert_bucket, array(), $tally );
+		$this->import_bucket( $client, $subscribe_bucket, $list_ids, $tally );
+
+		return $tally;
+	}
+
+	/**
+	 * Import one bucket of grouped contacts via `contacts.import`, in chunks.
+	 *
+	 * A transport/HTTP error fails the whole chunk; otherwise the per-contact
+	 * `operations` decide each customer's fate. Side effects (meta, notes,
+	 * hooks) mirror {@see sync_order()} and are applied to every order behind a
+	 * given email. The tally counts orders, not unique contacts.
+	 *
+	 * @param \WooNotifuse\Api\Client $client   Configured client.
+	 * @param array                   $bucket   Entries: { contact, subscribe, orders[] }.
+	 * @param string[]                $list_ids Lists to subscribe to (empty = upsert only).
+	 * @param array                   $tally    Running tally, modified by reference.
+	 */
+	private function import_bucket( $client, array $bucket, array $list_ids, array &$tally ) {
+		if ( empty( $bucket ) ) {
+			return;
+		}
+
+		$subscribed = ! empty( $list_ids );
+
+		foreach ( array_chunk( $bucket, self::BATCH_SIZE ) as $chunk ) {
+			$body = array( 'contacts' => array_map(
+				static function ( $entry ) {
+					return $entry['contact'];
+				},
+				$chunk
+			) );
+
+			if ( $subscribed ) {
+				$body['subscribe_to_lists'] = $list_ids;
+			}
+
+			$response = $client->post( 'api/contacts.import', $body );
+
+			// Transport error, non-2xx, or a global API error fails the chunk.
+			$global_error = is_wp_error( $response )
+				? $response->get_error_message()
+				: ( is_array( $response ) && ! empty( $response['error'] ) ? (string) $response['error'] : '' );
+
+			if ( '' !== $global_error ) {
+				foreach ( $chunk as $entry ) {
+					$this->fail_entry( $entry, $global_error, $tally );
+				}
+				continue;
+			}
+
+			// Map per-contact operation results back to emails (case-insensitive).
+			$ops = array();
+			if ( is_array( $response ) && ! empty( $response['operations'] ) && is_array( $response['operations'] ) ) {
+				foreach ( $response['operations'] as $op ) {
+					if ( is_array( $op ) && isset( $op['email'] ) ) {
+						$ops[ strtolower( (string) $op['email'] ) ] = $op;
+					}
+				}
+			}
+
+			foreach ( $chunk as $entry ) {
+				$key = strtolower( $entry['contact']['email'] );
+				$op  = isset( $ops[ $key ] ) ? $ops[ $key ] : null;
+
+				if ( $op && isset( $op['action'] ) && 'error' === $op['action'] ) {
+					$message = ! empty( $op['error'] ) ? (string) $op['error'] : __( 'Notifuse reported an error for this contact.', 'woonotifuse' );
+					$this->fail_entry( $entry, $message, $tally );
+					continue;
+				}
+
+				// Success (create/update) — or a 2xx with no operations echoed,
+				// which we treat as success since the import returned no error.
+				$this->succeed_entry( $entry, $op, $subscribed, $tally );
+			}
+		}
+	}
+
+	/**
+	 * Mark every order behind an entry as synced: stamp meta, fire hooks, tally.
+	 *
+	 * @param array     $entry      Grouped entry { contact, orders[] }.
+	 * @param array|null $op         The contact's import operation result, if any.
+	 * @param bool      $subscribed Whether this bucket subscribed to lists.
+	 * @param array     $tally      Tally, modified by reference.
+	 */
+	private function succeed_entry( array $entry, $op, $subscribed, array &$tally ) {
+		$now      = gmdate( 'Y-m-d\TH:i:s\Z' );
+		$contact  = $entry['contact'];
+		$response = is_array( $op ) ? $op : array();
+
+		foreach ( $entry['orders'] as $order ) {
+			$order->update_meta_data( self::SYNCED_META, $now );
+			if ( $subscribed ) {
+				$order->update_meta_data( self::SUBSCRIBED_META, $now );
+			}
+			$order->save_meta_data();
+
+			/** This action is documented in includes/class-order-sync.php. */
+			do_action( 'woonotifuse_contact_synced', $response, $contact, $order );
+
+			if ( $subscribed ) {
+				/** This action is documented in includes/class-order-sync.php. */
+				do_action( 'woonotifuse_lists_subscribed', $response, Settings::subscribe_list_ids(), $order );
+			}
+
+			++$tally['synced'];
+		}
+
+		$this->log(
+			sprintf(
+				$subscribed
+					? 'Batch: contact %1$s synced + subscribed (%2$d order(s)).'
+					: 'Batch: contact %1$s synced (%2$d order(s)).',
+				$contact['email'],
+				count( $entry['orders'] )
+			),
+			'info'
+		);
+	}
+
+	/**
+	 * Mark every order behind an entry as failed: note, log, tally.
+	 *
+	 * @param array  $entry   Grouped entry { contact, orders[] }.
+	 * @param string $message Failure detail.
+	 * @param array  $tally   Tally, modified by reference.
+	 */
+	private function fail_entry( array $entry, $message, array &$tally ) {
+		foreach ( $entry['orders'] as $order ) {
+			$this->record_failure( $order, $message );
+			++$tally['failed'];
+		}
+	}
+
+	/**
 	 * Assemble the Notifuse contact payload from an order.
 	 *
 	 * Standard billing fields plus the enabled custom-field mappings from
@@ -272,8 +524,18 @@ class Order_Sync {
 	 * @param WP_Error $error The failure.
 	 */
 	private function log_failure( WC_Order $order, WP_Error $error ) {
-		$message = $error->get_error_message();
+		$this->record_failure( $order, $error->get_error_message() );
+	}
 
+	/**
+	 * Record a sync failure for one order from a plain message: a logger line
+	 * plus a private order note so the problem is visible, never silently
+	 * dropped. Shared by the single-order and batch paths.
+	 *
+	 * @param WC_Order $order   Order.
+	 * @param string   $message Human-readable failure detail.
+	 */
+	private function record_failure( WC_Order $order, $message ) {
 		$this->log(
 			sprintf( 'Contact sync failed for order #%d: %s', $order->get_id(), $message ),
 			'error'
